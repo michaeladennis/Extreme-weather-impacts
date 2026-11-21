@@ -1,0 +1,137 @@
+---
+title: "HW 4 - Extreme Weather Impacts"
+author: "Michaela Dennis"
+date: today
+format: pdf
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+# Load all necessary packages
+library(sf) # vector data
+library(terra) # raster data
+library(here) # file path management
+library(tidyverse)
+library(rpart) # recursive partitioning and regression trees
+library(rpart.plot) # plotting for rpart
+library(tmap) # map making
+library(stars)
+```
+
+
+```{r}
+# Load data
+# list files for each band, including the full file path
+houston <- list.files(
+  path = "Extreme-weather-impacts/data/VNP46A1",
+  pattern = "\\.tif$",
+  full.names = TRUE
+)
+
+feb7a <- read_stars(houston[1])
+feb7b <- read_stars(houston[2])
+feb16a <- read_stars(houston[3])
+feb16b <- read_stars(houston[4])
+
+# roads
+roads <- "SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'"
+highways <- st_read(
+  here("Extreme-weather-impacts", "data", "gis_osm_roads_free_1.gpkg"),
+  query = roads
+)
+
+# buildings
+buildings <- "SELECT * FROM gis_osm_buildings_a_free_1 WHERE (type IS NULL AND name IS NULL) OR type in ('residential', 'apartments', 'house', 'static_caravan', 'detached')"
+homes <- st_read(
+  here("Extreme-weather-impacts", "data", "gis_osm_buildings_a_free_1.gpkg"),
+  query = buildings
+)
+```
+
+## Data Merging
+Houston lies on the border of two tiles. We need need to combine these two tiles together to get one raster for each date (2021-02-07 and 2021-02-16)
+
+```{r}
+feb7 <- st_mosaic(feb7a, feb7b)
+feb16 <- st_mosaic(feb16a, feb16b)
+```
+
+## Create blackout mask
+To identify places that experienced a blackout, you should create a “mask” that indicates for each cell whether or not it experienced a blackout.
+-  find the change in night lights intensity caused by the storm
+```{r}
+# change in night lights
+lights_change <- feb7 - feb16
+```
+
+- reclassify the difference raster, assuming that any location that experienced a drop of more than 200 nW cm-2sr-1 experienced a blackout
+
+```{r}
+# reclassify difference raster
+blackout <- lights_change
+blackout[blackout <= 200] <- NA
+```
+
+
+```{r}
+# crop (spatially subset) the blackout mask to the Houston area as defined by the following coordinates:
+# (-96.5, 29), (-96.5, 30.5), (-94.5, 30.5), (-94.5, 29)
+bbox <- st_bbox(
+  c(xmin = -96.5, ymin = 29, xmax = -94.5, ymax = 30.5),
+  crs = st_crs(4326)
+)
+blackout_houston <- st_crop(blackout, bbox)
+```
+
+re-project the cropped blackout dataset to EPSG:3083 (NAD83 / Texas Centric Albers Equal Area)
+
+```{r}
+blackout_reproj <- st_as_sf(st_transform(blackout_houston, crs = 3083))
+plot(blackout_reproj)
+```
+
+## Exclude highways from the cropped blackout mask
+Highways may have experienced changes in their night light intensities that are unrelated to the storm. Therefore, we exclude any locations within 200 meters of all highways in the Houston area.
+```{r}
+# Create a 200m buffer around highways
+hwy_buff <- highways |>
+  st_transform(crs = 3083) |>
+  st_union() |>
+  st_buffer(dist = 200)
+
+#make sure CRSs match
+if (st_crs(hwy_buff) != st_crs(blackout_reproj)) {
+  warning(
+    "CRS mismatch: highway buffer and blackout layers must both be EPSG:3083"
+  )
+}
+
+# areas that experienced blackouts that are further than 200m from a highway
+blackout_no_hwy <- st_difference(blackout_reproj, hwy_buff)
+
+# Identify buildings in blackout areas
+blackout_homes <- homes |>
+  st_transform(crs = 3083) |>
+  st_intersection(homes, blackout_no_hwy)
+```
+
+check that we found homes that experienced blackouts that are further than 200m from a highway
+
+```{r}
+# Total blackout area should shrink after removing highway buffers
+area_before <- sum(st_area(blackout_reproj))
+area_after <- sum(st_area(blackout_no_hwy))
+
+if (area_after >= area_before) {
+  warning("Highway buffer did not reduce blackout area")
+}
+# passed
+```
+
+still need
+- Night light maps from before and after the storms
+- A map of homes that lost power 
+- An estimate of the number of homes lost pow
+- reflection covering results and limitations
