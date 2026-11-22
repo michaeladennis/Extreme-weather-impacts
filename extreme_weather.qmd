@@ -3,19 +3,22 @@ title: "HW 4 - Extreme Weather Impacts"
 author: "Michaela Dennis"
 date: today
 format: pdf
+mainfont: Times New Roman
 execute:
   warning: false
   message: false
 ---
+In February of 2021, Texas experienced a series of winter storms that caused the loss of power to thousands of homes in Houston. This analysis looks to quantify the power loss between Febrary 7th and 16th. 
 
+
+# 1. Loading necessary packages and data
 ```{r}
 # Load all necessary packages
 library(sf) # vector data
 library(terra) # raster data
 library(here) # file path management
 library(tidyverse)
-library(rpart) # recursive partitioning and regression trees
-library(rpart.plot) # plotting for rpart
+library(kableExtra)
 library(tmap) # map making
 library(stars)
 ```
@@ -25,7 +28,7 @@ library(stars)
 # Load data
 # list files for each band, including the full file path
 houston <- list.files(
-  path = "Extreme-weather-impacts/data/VNP46A1",
+  path = here("data", "VNP46A1"),
   pattern = "\\.tif$",
   full.names = TRUE
 )
@@ -38,28 +41,69 @@ feb16b <- read_stars(houston[4])
 # roads
 roads <- "SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'"
 highways <- st_read(
-  here("Extreme-weather-impacts", "data", "gis_osm_roads_free_1.gpkg"),
+  here("data", "gis_osm_roads_free_1.gpkg"),
   query = roads
 )
 
 # buildings
 buildings <- "SELECT * FROM gis_osm_buildings_a_free_1 WHERE (type IS NULL AND name IS NULL) OR type in ('residential', 'apartments', 'house', 'static_caravan', 'detached')"
 homes <- st_read(
-  here("Extreme-weather-impacts", "data", "gis_osm_buildings_a_free_1.gpkg"),
+  here("data", "gis_osm_buildings_a_free_1.gpkg"),
   query = buildings
 )
 ```
 
-## Data Merging
-Houston lies on the border of two tiles. We need need to combine these two tiles together to get one raster for each date (2021-02-07 and 2021-02-16)
-
+# 2. Data Merging
+Houston lies on the border of two tiles. We  need to combine these two tiles together to get one raster for each date (2021-02-07 and 2021-02-16)
 ```{r}
 feb7 <- st_mosaic(feb7a, feb7b)
 feb16 <- st_mosaic(feb16a, feb16b)
 ```
 
-## Create blackout mask
-To identify places that experienced a blackout, you should create a “mask” that indicates for each cell whether or not it experienced a blackout.
+# 3. Maps of the light intensity before and after the storms
+```{r}
+# Make houston bbox
+bbox <- st_bbox(
+  c(xmin = -96.5, ymin = 29, xmax = -94.5, ymax = 30.5),
+  crs = st_crs(4326)
+)
+before <- st_crop(feb7, bbox)
+after <- st_crop(feb16, bbox)
+
+
+# Create maps to compare night light intensities before and after the first two storms
+before_map <- tm_shape(before) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      values = "viridis"
+    ),
+    col.legend = tm_legend(title = "Radiance (nW cm⁻² sr⁻¹)")
+  ) +
+  tm_title("Night Lights in Houston Before the storms") +
+  tm_scalebar(position = tm_pos_out("right", "center")) +
+  tm_compass(
+    position = c('left', 'bottom')
+  )
+
+# Create maps to compare night light intensities before and after the first two storms
+after_map <- tm_shape(after) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      values = "viridis"
+    ),
+    col.legend = tm_legend(title = "Radiance (nW cm⁻² sr⁻¹)")
+  ) +
+  tm_title("Night Lights in Houston After the storms") +
+  tm_scalebar(position = tm_pos_out("right", "center")) +
+  tm_compass(
+    position = c('left', 'bottom')
+  )
+tmap_arrange(before_map, after_map, ncol = 2)
+```
+
+
+# 4. Create blackout mask
+To identify places that experienced a blackout, create a “mask” that indicates for each cell whether or not it experienced a blackout.
 -  find the change in night lights intensity caused by the storm
 ```{r}
 # change in night lights
@@ -67,32 +111,31 @@ lights_change <- feb7 - feb16
 ```
 
 - reclassify the difference raster, assuming that any location that experienced a drop of more than 200 nW cm-2sr-1 experienced a blackout
-
 ```{r}
 # reclassify difference raster
 blackout <- lights_change
 blackout[blackout <= 200] <- NA
 ```
 
-
 ```{r}
 # crop (spatially subset) the blackout mask to the Houston area as defined by the following coordinates:
 # (-96.5, 29), (-96.5, 30.5), (-94.5, 30.5), (-94.5, 29)
-bbox <- st_bbox(
-  c(xmin = -96.5, ymin = 29, xmax = -94.5, ymax = 30.5),
-  crs = st_crs(4326)
-)
 blackout_houston <- st_crop(blackout, bbox)
 ```
 
-re-project the cropped blackout dataset to EPSG:3083 (NAD83 / Texas Centric Albers Equal Area)
+
+
+Re-project the cropped blackout dataset to EPSG:3083 (NAD83 / Texas Centric Albers Equal Area).
 
 ```{r}
-blackout_reproj <- st_as_sf(st_transform(blackout_houston, crs = 3083))
-plot(blackout_reproj)
+blackout_reproj <- blackout_houston |>
+  st_transform(crs = 3083) |>
+  st_as_sf() |>
+  st_make_valid()
 ```
 
-## Exclude highways from the cropped blackout mask
+
+# 5. Exclude highways from the cropped blackout mask
 Highways may have experienced changes in their night light intensities that are unrelated to the storm. Therefore, we exclude any locations within 200 meters of all highways in the Houston area.
 ```{r}
 # Create a 200m buffer around highways
@@ -109,20 +152,20 @@ if (st_crs(hwy_buff) != st_crs(blackout_reproj)) {
 }
 
 # areas that experienced blackouts that are further than 200m from a highway
-blackout_no_hwy <- st_difference(blackout_reproj, hwy_buff)
+true_blackout <- st_difference(blackout_reproj, hwy_buff)
 
 # Identify buildings in blackout areas
 blackout_homes <- homes |>
   st_transform(crs = 3083) |>
-  st_intersection(homes, blackout_no_hwy)
+  st_filter(true_blackout)
 ```
 
-check that we found homes that experienced blackouts that are further than 200m from a highway
+Check that we found homes that experienced blackouts that are further than 200m from a highway
 
 ```{r}
 # Total blackout area should shrink after removing highway buffers
 area_before <- sum(st_area(blackout_reproj))
-area_after <- sum(st_area(blackout_no_hwy))
+area_after <- sum(st_area(true_blackout))
 
 if (area_after >= area_before) {
   warning("Highway buffer did not reduce blackout area")
@@ -130,8 +173,29 @@ if (area_after >= area_before) {
 # passed
 ```
 
-still need
-- Night light maps from before and after the storms
-- A map of homes that lost power 
-- An estimate of the number of homes lost pow
-- reflection covering results and limitations
+
+
+# 6. Estimating the amount of homes that lost power
+
+```{r}
+kable(
+  length(unique(blackout_homes$osm_id)),
+  col.names = "Lost Power",
+  caption = "Estimate of homes that lost power"
+)
+```
+
+```{r}
+tm_basemap("OpenStreetMap") +
+  tm_shape(blackout_homes) +
+  tm_polygons(col = "darkred") +
+  tm_title("Homes that lost power after the storms") +
+  tm_scalebar(position = tm_pos_out("center", "bottom")) +
+  tm_compass(
+    position = c('left', 'bottom')
+  )
+```
+
+
+# 7. Reflections and limitations
+The maps show the significant change in night time lights over the course of major winter storms in Texas. The impacts of these storms highlight the need for proper infrastructure so that communities are well-equipped in the case of extreme weather, which is likely to increase in frequency with climate change. Despite the truth in these sentiments, it is important to acknowledge the limitations of this data. The outputs of this analysis are estimated from satellite data that records lights at night. This may not be the most precise measure of power loss. We also used an arbitrary threshold for power loss, which could significantly impact the counts produced in the analyses. Dropping the homes within 200 meters of highways may also have undercounted the true number of homes that lost power. Additional limitations include the short window of analysis (two days) and the building types included untyped, which may include non-homes. This analysis also does not engage with the communities impacted, so it is inconclusive if certain demographics were disproportionately impacted.
